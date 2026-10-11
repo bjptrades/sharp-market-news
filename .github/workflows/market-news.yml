@@ -1,0 +1,66 @@
+
+name: Sharp Market News
+
+on:
+  schedule:
+    - cron: '7,22,37,52 8-19 * * 1-5'
+      timezone: 'America/New_York'
+
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Choose test, preview, or live'
+        required: true
+        type: choice
+        default: test
+        options:
+          - test
+          - preview
+          - live
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sharp-market-news
+  cancel-in-progress: false
+
+jobs:
+  news:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Restore previously posted headlines
+        uses: actions/cache/restore@v5
+        with:
+          path: .news_seen.json
+          key: news-seen-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            news-seen-
+
+      - name: Check feeds and send relevant news
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_ROLE_ID: ${{ vars.DISCORD_ROLE_ID }}
+          PING_MODE: ${{ vars.PING_MODE || 'important' }}
+          RUN_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'live' }}
+        run: python news_bot.py
+
+      - name: Save previously posted headlines
+        if: success() && (github.event_name == 'schedule' || inputs.mode == 'live')
+        uses: actions/cache/save@v5
+        with:
+          path: .news_seen.json
+          key: news-seen-${{ github.run_id }}-${{ github.run_attempt }}
