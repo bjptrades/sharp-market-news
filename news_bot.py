@@ -39,6 +39,8 @@ IMPORTANT_PATTERNS = (
     r"\binterest.rate (?:decision|cut|hike)\b",
     r"\btrading (?:halt|suspend)\b",
     r"\bfiles? for bankruptcy\b",
+    r"\b(?:cpi|consumer price index|nonfarm payrolls?|jobs report|unemployment rate)\b.*\b(?:surges?|jumps?|falls?|drops?|unexpected|above estimates|below estimates)\b",
+    r"\b(?:trading halted|exchange halt|market.wide halt)\b",
 )
 
 @dataclass(frozen=True)
@@ -47,6 +49,58 @@ class Headline:
     link: str
     source: str
     published: int
+
+
+# These intentionally prefer missing a marginal headline over spamming members.
+# This is headline-based filtering, not a real-time market-impact classifier.
+PERSONAL_FINANCE_PATTERNS = (
+    r"\bmy (?:aunt|uncle|mother|father|mom|dad|parents|husband|wife|daughter|son|sister|brother)\b",
+    r"\b(?:i have no children|how much should i|should i retire|my retirement|my inheritance)\b",
+    r"\b(?:mortgage tips|credit card rewards|personal finance|401\(?k\)?|down payment|estate planning)\b",
+)
+CLICKBAIT_PATTERNS = (
+    r"\b(?:stocks? to buy|best stocks?|top \d+ stocks?|near buy points?|buy points?|stocks? you should buy)\b",
+    r"\b(?:could make you rich|millionaire maker|before it's too late|you won't believe|must own|hot stock picks?)\b",
+    r"\b(?:price prediction|what to buy now|should you buy|is it time to buy|worth buying)\b",
+)
+MACRO_PATTERNS = (
+    r"\b(?:federal reserve|fomc|jerome powell|fed chair|fed (?:raises|cuts|holds|keeps) rates|interest.rate|rate cut|rate hike|rate decision)\b",
+    r"\b(?:cpi|ppi|consumer price index|producer price index|inflation|nonfarm payrolls?|payrolls?|jobless claims|unemployment rate|jobs report|gdp)\b",
+    r"\b(?:treasury yields?|bond yields?|10.year treasury|treasury auction)\b",
+)
+MARKET_PATTERNS = (
+    r"\b(?:s&p 500|nasdaq|dow jones|wall street|stock futures|u\.?s\.? stocks?|russell 2000|equities|stock market|oil prices?|crude oil|gold futures)\b",
+)
+MARKET_MOVEMENT_PATTERNS = (
+    r"\b(?:rise|rises|rose|rally|rallies|surge|surges|jump|jumps|climb|climbs|fall|falls|fell|drop|drops|slump|slumps|plunge|plunges|selloff|sell.off|slide|slides|rebound|rebounded|sink|sinks|tumble|tumbles|halt|halts|close|closed|open|opens|record|highs|lows)\b",
+)
+COMPANY_PATTERNS = (
+    r"\b(?:nvidia|amd|advanced micro devices|micron|broadcom|apple|microsoft|alphabet|google|amazon|meta|tesla|robinhood|coinbase|palantir|netflix|jpmorgan|bank of america|exxon|intel|berkshire)\b",
+)
+CATALYST_PATTERNS = (
+    r"\b(?:earnings|revenue|profit warning|profit forecast|guidance|outlook|quarterly results?|forecasts?|cuts? forecasts?|raises? forecasts?|beats? estimates?|misses? estimates?|dividend|stock split|merger|acquisition|takeover|ipo|bankruptcy|sec investigation|antitrust|fda approval|recall|trading halt|suspend|suspends|downgrade|upgrade|ceo resigns?|investigation|settlement)\b",
+)
+
+
+def has_match(patterns: tuple[str, ...], title: str) -> bool:
+    return any(re.search(pattern, title, re.IGNORECASE) for pattern in patterns)
+
+
+def is_relevant(item: Headline) -> bool:
+    """Require a market-moving topic or stock catalyst; reject personal-finance clickbait."""
+    title = item.title
+    if has_match(PERSONAL_FINANCE_PATTERNS, title) or has_match(CLICKBAIT_PATTERNS, title):
+        return False
+    if has_match(MACRO_PATTERNS, title):
+        return True
+    if item.source == "Federal Reserve":
+        # Official feed is limited to monetary-policy press releases.
+        return True
+    if has_match(MARKET_PATTERNS, title) and (has_match(MARKET_MOVEMENT_PATTERNS, title) or has_match(CATALYST_PATTERNS, title)):
+        return True
+    if has_match(CATALYST_PATTERNS, title) and (has_match(COMPANY_PATTERNS, title) or re.search(r"\b(?:stocks?|shares|company|corporation)\b", title, re.IGNORECASE)):
+        return True
+    return False
 
 
 def clean_title(raw: str) -> str:
@@ -208,12 +262,20 @@ def run() -> int:
     for article in sorted(stories, key=lambda x: x.published, reverse=True):
         deduped.setdefault(fingerprint(article), article)
     unique = sorted(deduped.values(), key=lambda x: x.published, reverse=True)
+    relevant = [article for article in unique if is_relevant(article)]
+    print(f"Headline relevance filter: kept {len(relevant)} of {len(unique)} unique recent headlines; excluded {len(unique) - len(relevant)} off-topic or low-signal headlines.")
 
     if mode == "preview":
         print("PREVIEW — no Discord messages and no state changes.")
-        for article in unique[:8]:
+        print("QUALIFIED HEADLINES:")
+        for article in relevant[:8]:
             when = datetime.fromtimestamp(article.published, tz=timezone.utc).isoformat()
             print(f"{when} | {article.source} | {article.title} | {'IMPORTANT' if is_important(article) else 'routine'}")
+        if not relevant:
+            print("No headlines passed the relevance filter. This is OK; no posts are necessary.")
+        print("EXCLUDED EXAMPLES:")
+        for article in [article for article in unique if not is_relevant(article)][:5]:
+            print(f"  excluded: {article.title}")
         return 0
 
     if not webhook:
@@ -225,10 +287,10 @@ def run() -> int:
         for article in unique:
             seen[fingerprint(article)] = now
         save_seen(seen, now)
-        print(f"First live run: seeded {len(unique)} headlines, no Discord posts. Next run posts new news.")
+        print(f"First live run: seeded {len(unique)} headlines (including excluded ones), no Discord posts. Next run posts new qualified news.")
         return 0
 
-    pending = [article for article in unique if fingerprint(article) not in seen]
+    pending = [article for article in relevant if fingerprint(article) not in seen]
     # Prioritize important alerts, then newest, without claiming everything is actually impactful.
     pending.sort(key=lambda article: (is_important(article), article.published), reverse=True)
     posted = 0
