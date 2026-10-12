@@ -54,6 +54,9 @@ class Headline:
 # These intentionally prefer missing a marginal headline over spamming members.
 # This is headline-based filtering, not a real-time market-impact classifier.
 PERSONAL_FINANCE_PATTERNS = (
+    # Trading-room headlines should not cover holiday opening hours, mail delivery,
+    # school closures, or consumer banking service notices.
+    r"\b(?:columbus day|indigenous peoples.? day|usps|school closures?|bank holidays?|are banks open|banks open today|stock market hours today|is the stock market open)\b",
     r"\bmy (?:aunt|uncle|mother|father|mom|dad|parents|husband|wife|daughter|son|sister|brother)\b",
     r"\b(?:i have no children|how much should i|should i retire|my retirement|my inheritance)\b",
     r"\b(?:mortgage tips|credit card rewards|personal finance|401\(?k\)?|down payment|estate planning)\b",
@@ -201,20 +204,37 @@ def is_important(item: Headline) -> bool:
 
 
 def discord_payload(item: Headline, role_id: str, ping_mode: str) -> dict:
+    """Send a tidy native Discord embed; never print giant RSS links in content.
+
+    The embed's *title* is clickable, opening the original RSS link (which may be
+    a Google News redirect for aggregated stories). Discord won't show the
+    generic Google preview card because the link is not in message content.
+    """
     priority = is_important(item)
     ping = bool(role_id and (ping_mode == "all" or (ping_mode == "important" and priority)))
-    note = "📢 Potentially important headline" if priority else "📰 Market headline"
-    # User-controlled feeds may contain Discord mentions, so disable all mentions by default.
-    desc = (
-        f"**{note}**\n"
-        f"**{item.title.replace('`', '')}**\n"
-        f"Source feed: {item.source} · Published: <t:{item.published}:t>\n"
-        f"{item.link}\n"
-        "_Headline only. Check the original report and chart; this isn't a trade signal._"
-    )
-    prefix = f"<@&{role_id}>\n" if ping else ""
-    result = {"username": "Sharp Market News", "content": (prefix + desc)[:1900], "allowed_mentions": {"parse": [], "roles": [role_id] if ping else []}}
-    return result
+    published_iso = datetime.fromtimestamp(item.published, tz=timezone.utc).isoformat()
+    clean = clean_title(item.title)[:256]
+    # Useful source attribution and native Discord timestamp. Headlines are
+    # context, not evidence of a reliable trading setup or imminent move.
+    embed = {
+        "title": clean,
+        "url": item.link,
+        "description": (
+            "Potentially significant market development. Verify the original "
+            "report and price action before making trading decisions."
+            if priority else
+            "Market news for awareness. Check the original report; not a trade signal."
+        ),
+        "color": 0xD5A13B if priority else 0x268BC4,
+        "footer": {"text": f"{item.source} • Sharp Trading"},
+        "timestamp": published_iso,
+    }
+    return {
+        "username": "Sharp Market News",
+        "content": f"<@&{role_id}>" if ping else "",
+        "embeds": [embed],
+        "allowed_mentions": {"parse": [], "roles": [role_id] if ping else []},
+    }
 
 
 def post_webhook(session: requests.Session, webhook: str, payload: dict) -> None:
