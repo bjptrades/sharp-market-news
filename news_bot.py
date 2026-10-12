@@ -89,21 +89,69 @@ def has_match(patterns: tuple[str, ...], title: str) -> bool:
     return any(re.search(pattern, title, re.IGNORECASE) for pattern in patterns)
 
 
-def is_relevant(item: Headline) -> bool:
-    """Require a market-moving topic or stock catalyst; reject personal-finance clickbait."""
+# Require a concrete announcement or published outcome, not simply a market recap,
+# a watchlist, an analyst's projection, or a headline about events "in focus".
+LOW_SIGNAL_PATTERNS = (
+    r"\b(?:stock price forecast|analysts? (?:see|expect|predict)|price target|potential upside|\d+% upside|stocks? near buy points?)\b",
+    r"\b(?:stocks? to watch|market outlook|market preview|ahead of (?:earnings|inflation data|fed decision)|what investors? should|investment ideas?)\b",
+)
+FED_ACTION_PATTERNS = (
+    r"\b(?:federal reserve|fomc|the fed|fed chair)\b.{0,100}\b(?:raises?|cuts?|hikes?|holds?|keeps?|votes?|announces?|issues?|publishes?|minutes|statement|decision|signals?)\b",
+    r"\b(?:raises?|cuts?|hikes?|holds?) (?:the )?(?:benchmark |interest )?rates?\b",
+    r"\b(?:powell)\b.{0,50}\b(?:says?|signals?|warns?)\b",
+)
+MACRO_RELEASE_NAMES = (
+    r"\b(?:cpi|ppi|consumer price index|producer price index|inflation (?:rate|report)|nonfarm payrolls?|payrolls?|jobs report|employment report|jobless claims|unemployment rate|gdp|gross domestic product|retail sales report)\b",
+)
+RELEASE_RESULT_PATTERNS = (
+    r"\b(?:rises?|rose|increases?|increased|surges?|jumps?|climbs?|accelerates?|falls?|fell|drops?|declines?|slows?|eases?|decreases?|cooled|hotter|cooler|revised|revisions?|unexpectedly|beats?|misses?|exceeds?|below|above|comes? in|hits?|reported|released)\b",
+)
+COMPANY_EVENT_PATTERNS = (
+    r"\b(?:reports?|posts?|beats?|misses?) (?:\w+ )?(?:earnings|estimates|revenue|profit|sales)\b",
+    r"\b(?:earnings|revenue|profit|sales) (?:beats?|misses?|surges?|falls?|drops?|rises?|slumps?|jumps?|declines?)\b",
+    r"\b(?:cuts?|cutting|raises?|raising|lowers?|lowering|slashes?|slashing|withdraws?|withdrawing|reaffirms?|updates?) (?:\w+ )?(?:guidance|forecast|outlook)\b",
+    r"\b(?:acquires?|acquired|to acquire|merges?|merger|takeover|acquisition|buyout|rejects? (?:an? )?offer|agrees? to buy|rules? out (?:an? )?acquisition)\b",
+    r"\b(?:files? for bankruptcy|chapter 11|trading halt(?:ed)?|sec (?:charges|sues|investigates)|antitrust (?:suit|case)|fda (?:approves|rejects)|ceo resigns?|major recall)\b",
+    r"\b(?:upgrades?|downgrades?)\b",
+)
+EMERGENCY_PATTERNS = (
+    r"\b(?:circuit breaker|market.wide (?:halt|suspension)|trading halted|exchange halt|flash crash)\b",
+    r"\b(?:tariffs?|sanctions|export restrictions)\b.{0,70}\b(?:announces?|imposes?|lifts?|suspends?|delays?|raises?|cuts?)\b",
+    r"\b(?:announces?|imposes?|lifts?|suspends?|delays?)\b.{0,70}\b(?:tariffs?|sanctions|export restrictions)\b",
+    r"\b(?:opec\+?|opec plus)\b.{0,70}\b(?:cuts?|raises?|increases?|reduces?|announces?|agrees?|extends?|halts?)\b",
+)
+
+
+def relevance_reason(item: Headline) -> str | None:
     title = item.title
     if has_match(PERSONAL_FINANCE_PATTERNS, title) or has_match(CLICKBAIT_PATTERNS, title):
-        return False
-    if has_match(MACRO_PATTERNS, title):
-        return True
+        return None
+    if has_match(LOW_SIGNAL_PATTERNS, title):
+        return None
     if item.source == "Federal Reserve":
-        # Official feed is limited to monetary-policy press releases.
-        return True
-    if has_match(MARKET_PATTERNS, title) and (has_match(MARKET_MOVEMENT_PATTERNS, title) or has_match(CATALYST_PATTERNS, title)):
-        return True
-    if has_match(CATALYST_PATTERNS, title) and (has_match(COMPANY_PATTERNS, title) or re.search(r"\b(?:stocks?|shares|company|corporation)\b", title, re.IGNORECASE)):
-        return True
-    return False
+        return "Official Fed release"
+    if has_match(EMERGENCY_PATTERNS, title):
+        return "Market disruption / policy action"
+    if has_match(FED_ACTION_PATTERNS, title):
+        return "Fed policy announcement"
+    if has_match(MACRO_RELEASE_NAMES, title) and has_match(RELEASE_RESULT_PATTERNS, title):
+        return "Economic data result"
+    if has_match(COMPANY_EVENT_PATTERNS, title):
+        # Require evidence of a company context. Avoid non-company headlines
+        # using words such as "acquisition" or "upgrade" figuratively.
+        is_company = bool(
+            has_match(COMPANY_PATTERNS, title)
+            or re.search(r"\b(?:stocks?|shares?|company|nasdaq|nyse)\b", title, re.IGNORECASE)
+            or re.search(r"\b[A-Z][a-zA-Z.]+\b.*\b(?:merger|acquisition|takeover|upgrade|downgrade)\b", title, re.IGNORECASE)
+        )
+        if is_company:
+            return "Company catalyst"
+    return None
+
+
+def is_relevant(item: Headline) -> bool:
+    """True only when a headline describes an actual event or published data."""
+    return relevance_reason(item) is not None
 
 
 def clean_title(raw: str) -> str:
@@ -290,7 +338,7 @@ def run() -> int:
         print("QUALIFIED HEADLINES:")
         for article in relevant[:8]:
             when = datetime.fromtimestamp(article.published, tz=timezone.utc).isoformat()
-            print(f"{when} | {article.source} | {article.title} | {'IMPORTANT' if is_important(article) else 'routine'}")
+            print(f"{when} | {article.source} | {article.title} | {relevance_reason(article)} | {'IMPORTANT' if is_important(article) else 'routine'}")
         if not relevant:
             print("No headlines passed the relevance filter. This is OK; no posts are necessary.")
         print("EXCLUDED EXAMPLES:")
